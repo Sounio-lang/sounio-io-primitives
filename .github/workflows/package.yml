@@ -1,0 +1,50 @@
+name: Published compiler consumer
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  io-primitives:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install verified compiler distribution
+        env:
+          BUNDLE_URL: https://github.com/Sounio-lang/sounio/releases/download/madaros-distribution-20260920-preview/madaros-distribution.tar.gz
+          BUNDLE_SHA256: f0d4511124ad3bfc8c07173b2b33e83acbed7c3cb5a13bd00714e733d1b9c6d3
+        run: |
+          curl --fail --location --retry 3 "$BUNDLE_URL" -o "$RUNNER_TEMP/compiler.tar.gz"
+          echo "$BUNDLE_SHA256  $RUNNER_TEMP/compiler.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/compiler"
+          tar -xzf "$RUNNER_TEMP/compiler.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/compiler"
+          python3 "$RUNNER_TEMP/compiler/verify-distribution.py" --verify "$RUNNER_TEMP/compiler"
+          echo "$RUNNER_TEMP/compiler/bin" >> "$GITHUB_PATH"
+      - name: Execute all manifest tests
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, tomllib
+          from pathlib import Path
+          tests = tomllib.loads(Path('sounio.toml').read_text())['test']
+          assert tests and all(t.get('run') is True for t in tests)
+          results = []
+          for test in tests:
+              r = subprocess.run(['souc', 'run', test['path']], text=True, capture_output=True, timeout=120)
+              results.append({'name': test['name'], 'exit': r.returncode, 'stdout': r.stdout, 'stderr': r.stderr,
+                              'pass': r.returncode == 0 and 'NATIVE_REFUSAL' not in r.stdout + r.stderr})
+          Path('consumer-results.json').write_text(json.dumps(results, indent=2) + '\n')
+          for result in results:
+              print(result['name'], 'PASS' if result['pass'] else 'FAIL')
+          assert all(r['pass'] for r in results), results
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: io-primitives-external-consumer
+          path: consumer-results.json
+          if-no-files-found: warn
